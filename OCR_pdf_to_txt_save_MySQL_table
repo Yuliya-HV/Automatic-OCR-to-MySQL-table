@@ -1,0 +1,166 @@
+#This script automatically implements OCR of all pdf files in a given folder using Omnipage software, and insert ready textual data in MySQL database table and saves it in txt files in specific folder.
+
+import os
+import pymysql
+import shutil
+import time
+
+folder_with_pdf_files = 'folder_with_pdf_files'
+folder_with_ocr_files = 'folder_with_ocr_files'
+folder_pdf_to_OCR = 'folder_pdf_to_OCR\\OmnipageSA\\PDF\\'
+folder_txt_after_OCR = 'folder_txt_after_OCR\\OmnipageSA\\Output\\'
+folder_pdf_not_OCRed = 'folder_pdf_not_OCRed\\OmnipageSA\\PDF_not_OCRed\\'
+folder_error = 'folder_error'
+
+sql_query_select_dates = "SELECT date FROM NYT_FILE WHERE year(date) = %s GROUP BY date;"
+sql_query_select_files = "SELECT file_name_pdf FROM NYT_FILE WHERE date = %s;"
+sql_query_get_id_file = "SELECT id_file FROM NYT_FILE WHERE file_name_pdf = %s;"
+sql_query_get_id_issue = "SELECT id_issue FROM NYT_ISSUE WHERE issue_date = %s;"
+
+sql_query_insert = "INSERT INTO NYT_ARTICLE (`text_OCR`, `id_file`, `id_issue`, `txt_file_name`) VALUES (%s, %s, %s, %s);"
+sql_query_update = "UPDATE NYT_FILE SET ocr = 1 WHERE file_name_pdf = %s"
+
+#DECLARE FUNCTIONS
+def copy_files(date, list_of_files):   
+    
+    t = time.time()
+    
+    #check if any files are already in the folder, then delete all. Folder must be clean before copy a new portion of pdf files.
+    if len (os.listdir(folder_pdf_to_OCR)) > 0 :
+        tmp_file_list = os.listdir(folder_pdf_to_OCR)
+        for file in tmp_file_list:
+            os.remove(os.path.join(folder_pdf_to_OCR, file))
+    print('Folder is cleaned.')
+    
+    #folder is cleaned, copy files    
+    for file in list_of_files:
+        try:
+            print('File: ', file[0])
+            
+            shutil.copy2(folder_BOX_with_pdf_files + str(YEAR) + '\\' + file[0], folder_pdf_to_OCR + file[0])
+            
+        except Exception as e:
+            print(e)
+            
+    print(date, ' :: Running time to copy files: ', round((time.time() - t)/60, 2) )
+    
+    if len(list_of_files) == len(os.listdir(folder_pdf_to_OCR)):
+        return True
+    else:
+        print('Copy files were unsuccessful!')
+        return False
+
+def error_log(e, date):
+    with open(folder_error + 'Error_log.txt', 'a') as file:
+        file.write(str(date) + ', ' + str(e) + '\n')
+        file.close()
+
+#CONNECT TO MYSQL DATABASE
+conn = pymysql.connect(db="database_name",
+                       user="userID",
+                       passwd="password",
+                       host= "mysql_server_host", 
+                       port = 3306 #usually for MySQL
+                       )
+print('Connected to MySQL.')
+cursor = conn.cursor()
+
+
+#START GENERAL SCRIPT
+
+try:
+    #select all dates from NYT_FILE for a requested YEAR
+    list_of_dates = []
+    
+    cursor.execute(sql_query_select_dates, YEAR)
+    list_of_dates = cursor.fetchall()
+    print("Year :: {} :: Number of available dates: {}".format(YEAR, cursor.rowcount))
+    
+    #select all pfd files for each date
+    list_of_files = []
+    
+    for date in list_of_dates:
+            
+        cursor.execute(sql_query_select_files, date)
+        list_of_files = cursor.fetchall()
+        print('Files to do OCR: {}'.format(list_of_files))
+        
+        #copy pdf files in the folder folder_pdf_to_OCR to initiate OCR process with Omnipage
+        while copy_files(date, list_of_files):            
+            print('Ready to start OCR.')
+            #check if any files are already in the folder, then delete all. Folder must be clean before copy a new portion of pdf files.
+            if len (os.listdir(folder_txt_after_OCR)) > 0 :
+                tmp_file_list = os.listdir(folder_txt_after_OCR)
+                for file in tmp_file_list:
+                    os.remove(os.path.join(folder_txt_after_OCR, file))
+            print('Output folder is cleaned.')
+            OCR = 1
+            #here we expect Omnipage does OCR
+            # while the folder is not empty (means OCR is in the progress) - wait
+            wait = 0
+            while len(os.listdir(folder_pdf_to_OCR)) != 0:
+                wait +=1
+                print('len(os.listdir(folder_pdf_to_OCR)) = ', len(os.listdir(folder_pdf_to_OCR)))
+                time.sleep(15)
+                if wait == 20:
+                    print('Copy txt files to folder PDF_not_OCRed.')
+                    try:
+                        for file_problem in os.listdir(folder_pdf_to_OCR):
+                            shutil.copy2(folder_pdf_to_OCR + file_problem, folder_pdf_not_OCRed + file_problem)                    
+                    except Exception as e:
+                        print(e)
+                    break
+            
+            if len(os.listdir(folder_pdf_to_OCR)) == 0:
+                OCR = 0
+            else: 
+                print('Program interrupted due to uncompleted OCR.')
+                quit
+                
+            if OCR == 0:
+                print('OCR finished for ', date)
+  
+                #insert data in database:
+                print('OUTPUT LEN ', len(os.listdir(folder_txt_after_OCR)))
+                #read list of txt files - already OCRed articles
+                for txt in os.listdir(folder_txt_after_OCR):
+                    
+                    print('Copy txt files in the Box.')
+                    try:
+                        shutil.copy2(folder_txt_after_OCR + txt, folder_BOX_with_ocr_files + txt)                    
+                    except Exception as e:
+                        print(e)             
+                        
+                    #get id_file
+                    cursor.execute(sql_query_get_id_file, txt[:-9] + '.pdf')
+                    id_file = cursor.fetchall()
+                    print('id_file ', id_file[0])
+                    
+                    #get id_issue
+                    cursor.execute(sql_query_get_id_issue, date)
+                    id_issue = cursor.fetchall()
+                    print('id_issue ', id_issue[0])
+                    
+                    #read text from txt file
+                    text = open(folder_txt_after_OCR + '\\' + txt, 'rb')
+                    text_read = text.read()
+                    text_get = text_read.decode('utf-16')
+                    text_get = text_get.encode('ascii', 'ignore')
+                    text.close()
+                    #print(text_get)
+                    try:
+                        cursor.execute(sql_query_insert, (text_get, id_file, id_issue, txt))
+                        conn.commit()
+                        print('Data saved in the database successfully.')
+                        
+                    except Exception as e:
+                        print(e)
+            else:
+                print('OCR was not succesful for ', date)
+                error_log('OCR was not succesful for ', date)                
+            break
+            
+except:
+   conn.rollback()
+
+conn.close()
